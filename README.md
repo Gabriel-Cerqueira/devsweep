@@ -18,29 +18,12 @@ A ferramenta detecta diretórios de compilação descartáveis em múltiplos eco
   - **Flutter / Dart**: `.dart_tool/`, `build/`
   - **Elixir**: `_build/`, `deps/`
   - **PHP / Composer**: `vendor/`
-- **Interface de Terminal Interativa (TUI)**: Construída com `ratatui` e `crossterm`, oferecendo varredura em tempo real, ordenação, filtros e inspeção detalhada de projetos.
+- **Interface de Terminal Interativa (TUI)**: Construída com `ratatui` e `crossterm`, oferecendo varredura em tempo real, ordenação, filtros, auto-scrolling suave e inspeção detalhada de projetos.
 - **Varredura Multithreaded de Alta Performance**: Utiliza `jwalk` e `rayon` para travessia paralela de diretórios e cálculo rápido do tamanho dos arquivos.
 - **Segurança por Padrão**:
   - Validação estrita de caminhos para impedir exclusões acidentais fora da raiz do projeto ou em pastas de sistema.
   - Integração com a Lixeira do sistema operacional por padrão (via APIs do Windows Shell), com opção explícita para exclusão permanente.
 - **Modo CLI**: Comandos diretos de varredura e limpeza em lote para automação e scripts.
-
----
-
-## Instalação e Compilação
-
-### Pré-requisitos
-- [Rust Toolchain](https://rustup.rs/) (versão 1.80 ou superior recomendada)
-- Ferramentas de compilação C++ (MSVC no Windows, GCC/Clang no Linux/macOS)
-
-### Compilar Binário de Release
-```bash
-cargo build --release
-```
-
-O executável compilado estará disponível em:
-- Windows: `target/release/devsweep.exe`
-- Linux/macOS: `target/release/devsweep`
 
 ---
 
@@ -59,7 +42,7 @@ devsweep tui C:\Users\<Usuario>\Documents\GitHub
 #### Atalhos de Teclado na TUI
 | Tecla | Ação |
 | :--- | :--- |
-| `Up` / `Down` ou `k` / `j` | Mover o cursor de seleção |
+| `Up` / `Down` ou `k` / `j` | Mover o cursor de seleção (com rolagem automática da visualização) |
 | `PgUp` / `PgDown` | Rolar página para cima ou para baixo |
 | `Space` | Alternar seleção do projeto destacado |
 | `a` | Selecionar / desselecionar todos os projetos |
