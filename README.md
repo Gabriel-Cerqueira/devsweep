@@ -1,14 +1,14 @@
 # DevSweep
 
-DevSweep is a high-performance, native command-line and terminal user interface (TUI) utility built in Rust for scanning, analyzing, and cleaning developer build caches and artifacts.
+DevSweep é um utilitário nativo de linha de comando e interface de terminal (TUI) de alto desempenho desenvolvido em Rust, projetado para varredura, análise e limpeza de caches e artefatos de compilação gerados em ambientes de desenvolvimento.
 
-It detects disposable build targets across various ecosystems (Rust, Node.js, Python, Java/Gradle, .NET, C/C++, Flutter, and more) and safely reclaims disk space without risking source code.
+A ferramenta detecta diretórios de compilação descartáveis em múltiplos ecossistemas (Rust, Node.js, Python, Java/Gradle, .NET, C/C++, Flutter, entre outros) e recupera espaço em disco de forma segura, sem colocar o código-fonte em risco.
 
 ---
 
-## Features
+## Recursos
 
-- **Multi-Ecosystem Detection**: Identifies build artifacts across major programming ecosystems:
+- **Detecção Multiecossistema**: Identifica artefatos de build nos principais ambientes de desenvolvimento:
   - **Rust**: `target/`
   - **Node.js / Web**: `node_modules/`, `.next/`, `.nuxt/`, `.turbo/`, `.dist/`, `.output/`, `.svelte-kit/`, `.astro/`
   - **Python**: `.venv/`, `venv/`, `env/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.coverage`
@@ -18,105 +18,106 @@ It detects disposable build targets across various ecosystems (Rust, Node.js, Py
   - **Flutter / Dart**: `.dart_tool/`, `build/`
   - **Elixir**: `_build/`, `deps/`
   - **PHP / Composer**: `vendor/`
-- **Interactive Terminal UI (TUI)**: Built with `ratatui` and `crossterm` providing live scanning, sorting, filtering, and instant project inspection.
-- **Fast Multithreaded Scanning**: Uses `jwalk` and `rayon` for parallel directory traversal and size computation.
-- **Safe by Design**: 
-  - Validates artifact paths to prevent accidental deletion of source directories or system paths.
-  - Defaults to the system Recycle Bin (via OS Shell API) with an explicit opt-in for permanent deletion.
-- **CLI Mode**: Automated scanning and batch cleaning commands for scripts and CI pipelines.
+- **Interface de Terminal Interativa (TUI)**: Construída com `ratatui` e `crossterm`, oferecendo varredura em tempo real, ordenação, filtros e inspeção detalhada de projetos.
+- **Varredura Multithreaded de Alta Performance**: Utiliza `jwalk` e `rayon` para travessia paralela de diretórios e cálculo rápido do tamanho dos arquivos.
+- **Segurança por Padrão**:
+  - Validação estrita de caminhos para impedir exclusões acidentais fora da raiz do projeto ou em pastas de sistema.
+  - Integração com a Lixeira do sistema operacional por padrão (via APIs do Windows Shell), com opção explícita para exclusão permanente.
+- **Modo CLI**: Comandos diretos de varredura e limpeza em lote para automação e scripts.
 
 ---
 
-## Installation and Building
+## Instalação e Compilação
 
-### Prerequisites
-- [Rust Toolchain](https://rustup.rs/) (version 1.80+ recommended)
-- C++ Build Tools (MSVC on Windows, GCC/Clang on Linux/macOS)
+### Pré-requisitos
+- [Rust Toolchain](https://rustup.rs/) (versão 1.80 ou superior recomendada)
+- Ferramentas de compilação C++ (MSVC no Windows, GCC/Clang no Linux/macOS)
 
-### Build Release Binary
+### Compilar Binário de Release
 ```bash
 cargo build --release
 ```
-The compiled executable will be located at:
+
+O executável compilado estará disponível em:
 - Windows: `target/release/devsweep.exe`
 - Linux/macOS: `target/release/devsweep`
 
 ---
 
-## Usage
+## Uso
 
-### Interactive TUI Mode
-Launch the interactive dashboard in the current directory or target path:
+### Modo Interativo (TUI)
+Inicie o painel interativo no diretório atual ou em um caminho específico:
 ```bash
-# Scan current directory
+# Varrer diretório atual
 devsweep
 
-# Scan a specific directory or workspace
-devsweep tui C:\Users\<Username>\Documents\GitHub
+# Varrer um diretório ou workspace específico
+devsweep tui C:\Users\<Usuario>\Documents\GitHub
 ```
 
-#### TUI Keyboard Navigation
-| Key | Action |
+#### Atalhos de Teclado na TUI
+| Tecla | Ação |
 | :--- | :--- |
-| `Up` / `Down` or `k` / `j` | Move selection cursor up and down |
-| `PgUp` / `PgDown` | Scroll page up or down |
-| `Space` | Toggle selection for highlighted project |
-| `a` | Toggle select all / deselect all |
-| `d` / `Delete` | Open cleanup confirmation modal |
-| `s` | Cycle sorting field (Size, Age, Name, Ecosystem) and direction |
-| `f` | Filter by ecosystem |
-| `/` | Live search filter |
-| `r` | Restart directory scan |
-| `?` / `h` | Display help popup |
-| `Esc` | Clear search filter / Dismiss modal |
-| `q` | Quit application |
+| `Up` / `Down` ou `k` / `j` | Mover o cursor de seleção |
+| `PgUp` / `PgDown` | Rolar página para cima ou para baixo |
+| `Space` | Alternar seleção do projeto destacado |
+| `a` | Selecionar / desselecionar todos os projetos |
+| `d` / `Delete` | Abrir modal de confirmação de limpeza |
+| `s` | Alternar ordenação (Tamanho, Idade, Nome, Ecossistema) e direção |
+| `f` | Filtrar por ecossistema |
+| `/` | Ativar busca em tempo real |
+| `r` | Reiniciar a varredura |
+| `?` / `h` | Exibir janela de ajuda e atalhos |
+| `Esc` | Limpar busca / Fechar modal ativo |
+| `q` | Encerrar o programa |
 
 ---
 
-### Command Line Interface (CLI)
+### Interface de Linha de Comando (CLI)
 
-#### Scan Directory
-Scan a directory non-interactively and print a structured summary of reclaimable storage:
+#### Varrer Diretório (Scan)
+Executa a varredura não-interativa e exibe um relatório formatado com o espaço recuperável:
 ```bash
-devsweep scan C:\projects
+devsweep scan C:\projetos
 
-# Filter by ecosystem
-devsweep scan C:\projects --type node
+# Filtrar por ecossistema
+devsweep scan C:\projetos --type node
 
-# Show projects inactive for more than 30 days
-devsweep scan C:\projects --older-than 30
+# Exibir apenas projetos inativos há mais de 30 dias
+devsweep scan C:\projetos --older-than 30
 ```
 
-#### Clean Artifacts
-Clean build caches directly from the command line:
+#### Limpar Artefatos (Clean)
+Executa a limpeza diretamente pela linha de comando:
 ```bash
-# Clean with interactive prompt
-devsweep clean C:\projects
+# Limpeza com confirmação interativa
+devsweep clean C:\projetos
 
-# Dry run simulation (no files modified)
-devsweep clean C:\projects --dry-run
+# Simulação (Dry run - nenhum arquivo é excluído)
+devsweep clean C:\projetos --dry-run
 
-# Clean all discovered projects without confirmation prompt
-devsweep clean C:\projects --all --yes
+# Limpar todos os projetos encontrados sem confirmação interativa
+devsweep clean C:\projetos --all --yes
 
-# Clean only Python virtual environments inactive for over 60 days
-devsweep clean C:\projects --type python --older-than 60 --yes
+# Limpar apenas ambientes virtuais Python inativos há mais de 60 dias
+devsweep clean C:\projetos --type python --older-than 60 --yes
 
-# Permanently delete instead of sending to the Recycle Bin
-devsweep clean C:\projects --type rust --permanent --yes
+# Exclusão permanente em vez de enviar para a Lixeira
+devsweep clean C:\projetos --type rust --permanent --yes
 ```
 
 ---
 
-## Safety and Validation Architecture
+## Arquitetura de Segurança e Validação
 
-1. **Path Boundary Validation**: Every deletion candidate is checked to ensure it is contained strictly within a recognized project root.
-2. **Whitelist Verification**: Only explicitly categorized build directory names (e.g., `target`, `node_modules`) are eligible for deletion.
-3. **Root Guard**: Attempts to target root directories, drives, or top-level project folders are blocked automatically.
-4. **Recycle Bin Integration**: Deletions invoke platform shell APIs (`IFileOperation` / `SHFileOperation` on Windows) to allow file restoration if needed.
+1. **Validação de Escopo de Caminho**: Cada candidato à exclusão é verificado para garantir que está localizado estritamente dentro da raiz do projeto correspondente.
+2. **Lista Branca (*Whitelist*)**: Apenas pastas explicitamente categorizadas como alvos de compilação (ex: `target`, `node_modules`, `.venv`) são elegíveis para exclusão.
+3. **Bloqueio de Raiz**: Tentativas de apontar para diretórios raiz, unidades de disco ou a própria pasta do projeto são bloqueadas automaticamente.
+4. **Integração com a Lixeira**: As deleções padrão invocam APIs do Shell do sistema operacional (`SHFileOperation` / `IFileOperation` no Windows), permitindo restauração caso necessário.
 
 ---
 
-## License
+## Licença
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Este projeto está sob a licença MIT. Consulte o arquivo [LICENSE](LICENSE) para obter mais detalhes.
