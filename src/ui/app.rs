@@ -2,19 +2,20 @@
 //!
 //! Este módulo gerencia o estado completo da interface de terminal do DevSweep:
 //! lista de projetos descobertos, filtros ativos, ordenação, seleção de itens,
-//! controle do cursor e execução em lote de limpezas.
+//! controle do cursor e execução assíncrona de limpezas com feedback visual contínuo.
 //!
 //! ### Conceitos Rust Demonstrados:
 //! 1. **Padrão State Machine & Single Source of Truth**:
 //!    - Todos os estados da UI residem na struct `App`.
 //!    - `filtered_indices: Vec<usize>` atua como uma visão projetada (índices que apontam para `projects`),
 //!      evitando duplicação de instâncias de `ProjectInfo`.
-//! 2. **`try_recv()` para I/O Não-Bloqueante**:
-//!    - Drenagem da fila de mensagens a cada ciclo do loop de renderização da TUI sem bloquear a thread visual.
+//! 2. **`try_recv()` para I/O e Deleção Não-Bloqueante**:
+//!    - As operações pesadas de I/O (varredura e exclusão na Lixeira) rodam em threads separadas,
+//!      enviando mensagens por canais MPSC enquanto a TUI renderiza a 60 FPS com animação e barra de progresso.
 //! 3. **`TableState` para Auto-Scroll**:
 //!    - Gerencia automaticamente a janela visível da tabela conforme o cursor se move para baixo ou para cima.
 
-use crate::cleaner::{clean_project, DeletionMethod};
+use crate::cleaner::{clean_projects_threaded, CleanMessage, DeletionMethod};
 use crate::scanner::model::{
     format_bytes, Ecosystem, ProjectInfo, ScanMessage, SortDirection, SortField,
 };
@@ -33,10 +34,23 @@ use std::thread;
 pub enum ModalState {
     /// Modal de confirmação de exclusão dos projetos selecionados
     ConfirmDelete,
+    /// Modal de progresso visual com spinner e barra de status durante a exclusão
+    CleaningProgress,
     /// Modal de ajuda com atalhos de teclado
     Help,
     /// Modal de seleção rápida de filtro por ecossistema
     FilterEcosystem,
+}
+
+/// Informações de progresso em tempo real da exclusão de artefatos.
+#[derive(Debug, Clone)]
+pub struct CleanProgressInfo {
+    pub project_name: String,
+    pub artifact_name: String,
+    pub current_step: usize,
+    pub total_steps: usize,
+    pub bytes_freed_so_far: u64,
+    pub spinner_tick: usize,
 }
 
 /// Estrutura central que guarda todo o estado da interface gráfica do terminal.
@@ -79,6 +93,15 @@ pub struct App {
     /// Canal transmissor de mensagens de varredura
     pub scan_tx: Sender<ScanMessage>,
 
+    /// Indica se uma operação de limpeza de arquivos está em andamento
+    pub is_cleaning: bool,
+    /// Dados de progresso da limpeza em execução
+    pub clean_progress_info: Option<CleanProgressInfo>,
+    /// Canal receptor de mensagens de limpeza
+    pub clean_rx: Receiver<CleanMessage>,
+    /// Canal transmissor de mensagens de limpeza
+    pub clean_tx: Sender<CleanMessage>,
+
     /// Modal ativo na tela (se houver)
     pub active_modal: Option<ModalState>,
     /// Método de exclusão configurado (Lixeira vs Permanente)
@@ -98,6 +121,7 @@ impl App {
     /// Inicializa uma nova sessão da TUI e dispara a primeira varredura em segundo plano.
     pub fn new(root_path: PathBuf) -> Self {
         let (scan_tx, scan_rx) = channel();
+        let (clean_tx, clean_rx) = channel();
         let scan_cancel = Arc::new(AtomicBool::new(false));
         let mut table_state = TableState::default();
         table_state.select(Some(0));
@@ -120,6 +144,10 @@ impl App {
             scan_cancel,
             scan_rx,
             scan_tx,
+            is_cleaning: false,
+            clean_progress_info: None,
+            clean_rx,
+            clean_tx,
             active_modal: None,
             delete_method: DeletionMethod::Trash,
             total_scanned_bytes: 0,
@@ -195,6 +223,101 @@ impl App {
                 ScanMessage::Error(err) => {
                     self.is_scanning = false;
                     self.set_status(format!("Scan error: {}", err));
+                }
+            }
+        }
+    }
+
+    /// Processa mensagens pendentes emitidas pela thread assíncrona de limpeza.
+    pub fn process_clean_messages(&mut self) {
+        if let Some(ref mut progress) = self.clean_progress_info {
+            progress.spinner_tick = progress.spinner_tick.wrapping_add(1);
+        }
+
+        while let Ok(msg) = self.clean_rx.try_recv() {
+            match msg {
+                CleanMessage::CleaningArtifact {
+                    project_name,
+                    artifact_name,
+                    current_step,
+                    total_steps,
+                    ..
+                } => {
+                    let prev_freed = self
+                        .clean_progress_info
+                        .as_ref()
+                        .map(|p| p.bytes_freed_so_far)
+                        .unwrap_or(0);
+                    let tick = self
+                        .clean_progress_info
+                        .as_ref()
+                        .map(|p| p.spinner_tick)
+                        .unwrap_or(0);
+
+                    self.clean_progress_info = Some(CleanProgressInfo {
+                        project_name,
+                        artifact_name,
+                        current_step,
+                        total_steps,
+                        bytes_freed_so_far: prev_freed,
+                        spinner_tick: tick,
+                    });
+                }
+                CleanMessage::ArtifactCleaned {
+                    project_id,
+                    result,
+                } => {
+                    if result.success {
+                        self.total_freed_bytes += result.bytes_freed;
+                        self.total_scanned_bytes =
+                            self.total_scanned_bytes.saturating_sub(result.bytes_freed);
+
+                        if let Some(ref mut progress) = self.clean_progress_info {
+                            progress.bytes_freed_so_far += result.bytes_freed;
+                        }
+
+                        // Remove artefato do projeto em memória
+                        if let Some(proj) = self.projects.iter_mut().find(|p| p.id == project_id) {
+                            proj.artifacts.retain(|a| a.full_path != result.artifact_path);
+                            proj.recalculate_totals();
+                        }
+                    }
+                }
+                CleanMessage::Finished {
+                    total_freed,
+                    deleted_count,
+                    failed_count,
+                } => {
+                    self.is_cleaning = false;
+                    self.clean_progress_info = None;
+                    self.active_modal = None;
+
+                    // Remove projetos que ficaram sem nenhum artefato
+                    self.projects.retain(|p| !p.artifacts.is_empty());
+                    self.selected_ids.clear();
+                    self.reapply_filter_and_sort();
+
+                    let target_name = match self.delete_method {
+                        DeletionMethod::Trash => "moved to Recycle Bin",
+                        DeletionMethod::Permanent => "permanently deleted",
+                    };
+
+                    if failed_count > 0 {
+                        self.set_status(format!(
+                            "Cleaned {} projects ({}), but {} had errors ({})",
+                            deleted_count,
+                            format_bytes(total_freed),
+                            failed_count,
+                            target_name
+                        ));
+                    } else {
+                        self.set_status(format!(
+                            "Successfully cleaned {} projects. Freed {} ({})",
+                            deleted_count,
+                            format_bytes(total_freed),
+                            target_name
+                        ));
+                    }
                 }
             }
         }
@@ -389,8 +512,12 @@ impl App {
         self.reapply_filter_and_sort();
     }
 
-    /// Executa a deleção física ou envio para a lixeira dos projetos selecionados.
+    /// Dispara a exclusão física ou envio para a lixeira dos projetos selecionados em segundo plano.
     pub fn execute_deletion(&mut self) {
+        if self.is_cleaning {
+            return;
+        }
+
         let to_delete_ids: Vec<String> = if self.selected_ids.is_empty() {
             if let Some(current) = self.current_selected_project() {
                 vec![current.id.clone()]
@@ -401,62 +528,39 @@ impl App {
             self.selected_ids.iter().cloned().collect()
         };
 
-        let mut freed_in_batch = 0u64;
-        let mut deleted_count = 0usize;
-        let mut failed_count = 0usize;
+        let projects_to_clean: Vec<ProjectInfo> = self
+            .projects
+            .iter()
+            .filter(|p| to_delete_ids.contains(&p.id))
+            .cloned()
+            .collect();
 
-        let method = self.delete_method;
+        if projects_to_clean.is_empty() {
+            return;
+        }
 
-        self.projects.retain_mut(|project| {
-            if to_delete_ids.contains(&project.id) {
-                let results = clean_project(project, method);
-                let all_success = results.iter().all(|r| r.success);
-                let bytes_freed: u64 = results.iter().map(|r| r.bytes_freed).sum();
+        self.is_cleaning = true;
+        self.active_modal = Some(ModalState::CleaningProgress);
 
-                if all_success {
-                    freed_in_batch += bytes_freed;
-                    deleted_count += 1;
-                    false
-                } else {
-                    failed_count += 1;
-                    project.artifacts.retain(|a| {
-                        !results
-                            .iter()
-                            .any(|r| r.artifact_path == a.full_path && r.success)
-                    });
-                    project.recalculate_totals();
-                    true
-                }
-            } else {
-                true
-            }
+        let total_steps: usize = projects_to_clean.iter().map(|p| p.artifacts.len()).sum();
+        self.clean_progress_info = Some(CleanProgressInfo {
+            project_name: projects_to_clean[0].name.clone(),
+            artifact_name: "preparing...".to_string(),
+            current_step: 0,
+            total_steps,
+            bytes_freed_so_far: 0,
+            spinner_tick: 0,
         });
 
-        self.total_freed_bytes += freed_in_batch;
-        self.total_scanned_bytes = self.total_scanned_bytes.saturating_sub(freed_in_batch);
-        self.selected_ids.clear();
-        self.reapply_filter_and_sort();
+        let (new_clean_tx, new_clean_rx) = channel();
+        self.clean_tx = new_clean_tx;
+        self.clean_rx = new_clean_rx;
 
-        let target_name = match method {
-            DeletionMethod::Trash => "moved to Recycle Bin",
-            DeletionMethod::Permanent => "permanently deleted",
-        };
+        let sender = self.clean_tx.clone();
+        let method = self.delete_method;
 
-        if failed_count > 0 {
-            self.set_status(format!(
-                "Cleaned {} projects ({}), but {} had errors ({})",
-                deleted_count,
-                format_bytes(freed_in_batch),
-                failed_count,
-                target_name
-            ));
-        } else {
-            self.set_status(format!(
-                "Successfully cleaned {} projects. Freed {} ({})",
-                deleted_count,
-                format_bytes(freed_in_batch),
-                target_name
-            ));
-        }
+        thread::spawn(move || {
+            clean_projects_threaded(projects_to_clean, method, sender);
+        });
     }
 }

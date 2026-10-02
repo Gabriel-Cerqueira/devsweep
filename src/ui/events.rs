@@ -1,3 +1,19 @@
+//! # Loop de Eventos do Terminal e Captura de Teclado
+//!
+//! Este módulo gerencia o ciclo de vida do terminal (modo raw, tela alternativa)
+//! e despacha os eventos de entrada do teclado usando a crate `crossterm`.
+//!
+//! ### Conceitos Rust e Terminal Demonstrados:
+//! 1. **Modo Raw (*Raw Mode*) e Alternate Screen Buffer**:
+//!    - `enable_raw_mode()`: Desativa o buffer de linha e eco automático do terminal para capturar teclas instantaneamente.
+//!    - `EnterAlternateScreen`: Abre um buffer de tela secundário, garantindo que ao sair do DevSweep o terminal anterior
+//!      permaneça intacto.
+//! 2. **Garantia de Restauração de Recursos (Padrão RAII / Cleanup)**:
+//!    - Restauração explícita do terminal ao encerrar o loop (`disable_raw_mode`, `LeaveAlternateScreen`, `show_cursor`).
+//! 3. **Non-blocking Event Polling (`event::poll`)**:
+//!    - O loop roda a cada 50ms para atualizar animações e mensagens de progresso da varredura e limpeza,
+//!      lendo teclas apenas quando disponíveis sem travar a CPU em 100%.
+
 use crate::cleaner::DeletionMethod;
 use crate::scanner::model::Ecosystem;
 use crate::ui::app::{App, ModalState};
@@ -12,6 +28,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::stdout;
 use std::time::Duration;
 
+/// Inicia o loop principal da TUI, configurando o terminal e tratando o ciclo de vida.
 pub fn run_tui(mut app: App) -> Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
@@ -22,8 +39,11 @@ pub fn run_tui(mut app: App) -> Result<()> {
     let tick_rate = Duration::from_millis(50);
 
     while !app.should_quit {
+        // Processa mensagens de varredura e limpeza em segundo plano
         app.process_scan_messages();
+        app.process_clean_messages();
 
+        // Desenha o frame atual (com animações do spinner e barra de progresso)
         terminal.draw(|f| {
             render(f, &mut app);
         })?;
@@ -44,12 +64,20 @@ pub fn run_tui(mut app: App) -> Result<()> {
     Ok(())
 }
 
+/// Trata a tecla pressionada com base no contexto ativo (busca, modais ou navegação geral).
 fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    // Atalho universal para abortar/sair (Ctrl + C)
     if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
         app.should_quit = true;
         return;
     }
 
+    // Se estiver em processo de exclusão de arquivos, bloqueia comandos para evitar race conditions
+    if app.is_cleaning {
+        return;
+    }
+
+    // Contexto 1: Usuário está digitando na barra de busca ao vivo
     if app.is_searching {
         match code {
             KeyCode::Enter | KeyCode::Esc => {
@@ -68,6 +96,7 @@ fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
+    // Contexto 2: Um modal está sobreposto na tela
     if let Some(modal) = app.active_modal {
         match modal {
             ModalState::ConfirmDelete => match code {
@@ -86,6 +115,9 @@ fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                 }
                 _ => {}
             },
+            ModalState::CleaningProgress => {
+                // Bloqueado enquanto limpa
+            }
             ModalState::Help => match code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Enter => {
                     app.active_modal = None;
@@ -142,6 +174,7 @@ fn handle_key_event(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
+    // Contexto 3: Modo de navegação normal da tabela
     match code {
         KeyCode::Char('q') => {
             app.should_quit = true;

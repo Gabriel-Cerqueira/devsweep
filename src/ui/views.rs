@@ -8,8 +8,8 @@
 //! 2. **Widget Composition & Stateful Scrolling**:
 //!    - Uso de `f.render_stateful_widget` com `TableState` para que a tabela acompanhe automaticamente
 //!      o cursor do usuário conforme navega por listas longas.
-//! 3. **Modais Sobrepostos (*Popup / Overlay*)**:
-//!    - Cálculo de coordenadas centradas e uso do widget `Clear` para limpar o fundo antes de renderizar o diálogo.
+//! 3. **Modais Sobrepostos (*Popup / Overlay*) com Feedback Visual em Tempo Real**:
+//!    - Modal de progresso animado durante a exclusão, com barra de progresso gráfica e spinner contínuo.
 
 use crate::cleaner::DeletionMethod;
 use crate::scanner::model::{format_age, format_bytes, Ecosystem, SortDirection, SortField};
@@ -19,10 +19,13 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap,
+        Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap,
     },
     Frame,
 };
+
+/// Spinner com glifos braille para animação suave a 20 FPS.
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Função principal de renderização chamada a cada frame da TUI.
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -46,15 +49,29 @@ pub fn render(f: &mut Frame, app: &mut App) {
     if let Some(modal) = app.active_modal {
         match modal {
             ModalState::ConfirmDelete => render_confirm_modal(f, app, size),
+            ModalState::CleaningProgress => render_cleaning_progress_modal(f, app, size),
             ModalState::Help => render_help_modal(f, size),
             ModalState::FilterEcosystem => render_filter_modal(f, app, size),
         }
     }
 }
 
-/// Renderiza o cabeçalho superior com título, status da varredura e resumo estatístico.
+/// Renderiza o cabeçalho superior com título, status da varredura/limpeza e resumo estatístico.
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
-    let scan_status_span = if app.is_scanning {
+    let scan_status_span = if app.is_cleaning {
+        let tick = app
+            .clean_progress_info
+            .as_ref()
+            .map(|p| p.spinner_tick)
+            .unwrap_or(0);
+        let spinner_char = SPINNER_FRAMES[tick % SPINNER_FRAMES.len()];
+        Span::styled(
+            format!(" [{} CLEANING CACHES...] ", spinner_char),
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app.is_scanning {
         let path_text = app
             .current_scanning_dir
             .as_ref()
@@ -361,14 +378,22 @@ fn render_inspector(f: &mut Frame, app: &App, area: Rect) {
 
 /// Renderiza a barra de atalhos e status na parte inferior do terminal.
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
-    let status_text = if let Some((msg, _)) = &app.status_message {
+    let status_text = if app.is_cleaning {
+        "[Cleaning in progress... Please wait]"
+    } else if let Some((msg, _)) = &app.status_message {
         msg.as_str()
     } else {
         "[Space] Select | [A] All | [D] Clean | [S] Sort | [F] Filter | [/] Search | [R] Rescan | [?] Help | [Q] Quit"
     };
 
     let p = Paragraph::new(status_text)
-        .style(Style::default().fg(Color::Gray))
+        .style(if app.is_cleaning {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        })
         .alignment(Alignment::Left);
 
     f.render_widget(p, area);
@@ -488,6 +513,124 @@ fn render_confirm_modal(f: &mut Frame, app: &App, area: Rect) {
         .wrap(Wrap { trim: false });
 
     f.render_widget(para, popup_area);
+}
+
+/// Renderiza o modal de progresso ao vivo durante a exclusão.
+fn render_cleaning_progress_modal(f: &mut Frame, app: &App, area: Rect) {
+    let popup_area = centered_rect(65, 40, area);
+    f.render_widget(Clear, popup_area);
+
+    let tick = app
+        .clean_progress_info
+        .as_ref()
+        .map(|p| p.spinner_tick)
+        .unwrap_or(0);
+    let spinner_char = SPINNER_FRAMES[tick % SPINNER_FRAMES.len()];
+
+    let current_step = app
+        .clean_progress_info
+        .as_ref()
+        .map(|p| p.current_step)
+        .unwrap_or(0);
+    let total_steps = app
+        .clean_progress_info
+        .as_ref()
+        .map(|p| p.total_steps)
+        .unwrap_or(1)
+        .max(1);
+
+    let project_name = app
+        .clean_progress_info
+        .as_ref()
+        .map(|p| p.project_name.as_str())
+        .unwrap_or("...");
+    let artifact_name = app
+        .clean_progress_info
+        .as_ref()
+        .map(|p| p.artifact_name.as_str())
+        .unwrap_or("...");
+    let freed_so_far = app
+        .clean_progress_info
+        .as_ref()
+        .map(|p| p.bytes_freed_so_far)
+        .unwrap_or(0);
+
+    let progress_ratio = (current_step as f64 / total_steps as f64).min(1.0).max(0.0);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(popup_area);
+
+    let method_str = match app.delete_method {
+        DeletionMethod::Trash => "Moving to OS Recycle Bin (Safe)",
+        DeletionMethod::Permanent => "Permanently deleting from disk",
+    };
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            format!(" {} Cleaning Artifacts in Progress... ", spinner_char),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    f.render_widget(
+        Paragraph::new(title_line).alignment(Alignment::Center),
+        chunks[0],
+    );
+
+    let gauge = Gauge::default()
+        .gauge_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::Rgb(30, 35, 45)),
+        )
+        .ratio(progress_ratio)
+        .label(format!("{}/{} ({}%)", current_step, total_steps, (progress_ratio * 100.0) as usize));
+    f.render_widget(gauge, chunks[1]);
+
+    let details_lines = vec![
+        Line::from(vec![
+            Span::styled("Current Project: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(project_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("  |  Artifact: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(artifact_name, Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled("Freed so far: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format_bytes(freed_so_far), Style::default().fg(Color::Yellow)),
+            Span::styled("  |  Mode: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(method_str, Style::default().fg(Color::Gray)),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(details_lines).alignment(Alignment::Center),
+        chunks[2],
+    );
+
+    let note_line = Line::from(Span::styled(
+        "Please wait, disk I/O in progress...",
+        Style::default().fg(Color::DarkGray),
+    ));
+    f.render_widget(
+        Paragraph::new(note_line).alignment(Alignment::Center),
+        chunks[3],
+    );
+
+    let block = Block::default()
+        .title(" Cleanup in Progress ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow));
+    f.render_widget(block, popup_area);
 }
 
 /// Renderiza o modal de ajuda com todos os atalhos de teclado.
