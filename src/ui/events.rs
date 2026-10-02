@@ -25,7 +25,7 @@ pub fn run_tui(mut app: App) -> Result<()> {
         app.process_scan_messages();
 
         terminal.draw(|f| {
-            render(f, &app);
+            render(f, &mut app);
         })?;
 
         if event::poll(tick_rate)? {

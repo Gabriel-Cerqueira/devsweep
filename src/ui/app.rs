@@ -1,9 +1,26 @@
+//! # Gerenciador de Estado da Aplicação TUI
+//!
+//! Este módulo gerencia o estado completo da interface de terminal do DevSweep:
+//! lista de projetos descobertos, filtros ativos, ordenação, seleção de itens,
+//! controle do cursor e execução em lote de limpezas.
+//!
+//! ### Conceitos Rust Demonstrados:
+//! 1. **Padrão State Machine & Single Source of Truth**:
+//!    - Todos os estados da UI residem na struct `App`.
+//!    - `filtered_indices: Vec<usize>` atua como uma visão projetada (índices que apontam para `projects`),
+//!      evitando duplicação de instâncias de `ProjectInfo`.
+//! 2. **`try_recv()` para I/O Não-Bloqueante**:
+//!    - Drenagem da fila de mensagens a cada ciclo do loop de renderização da TUI sem bloquear a thread visual.
+//! 3. **`TableState` para Auto-Scroll**:
+//!    - Gerencia automaticamente a janela visível da tabela conforme o cursor se move para baixo ou para cima.
+
 use crate::cleaner::{clean_project, DeletionMethod};
 use crate::scanner::model::{
     format_bytes, Ecosystem, ProjectInfo, ScanMessage, SortDirection, SortField,
 };
 use crate::scanner::walker::scan_path;
 use chrono::Local;
+use ratatui::widgets::TableState;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,48 +28,79 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
+/// Estados possíveis de modais e caixas de diálogo sobrepostas na tela.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalState {
+    /// Modal de confirmação de exclusão dos projetos selecionados
     ConfirmDelete,
+    /// Modal de ajuda com atalhos de teclado
     Help,
+    /// Modal de seleção rápida de filtro por ecossistema
     FilterEcosystem,
 }
 
+/// Estrutura central que guarda todo o estado da interface gráfica do terminal.
 pub struct App {
+    /// Diretório raiz configurado para a varredura
     pub root_path: PathBuf,
+    /// Lista master de todos os projetos identificados
     pub projects: Vec<ProjectInfo>,
+    /// Índices dos projetos em `projects` que passam pelos critérios atuais de filtro e ordenação
     pub filtered_indices: Vec<usize>,
+    /// Conjunto de IDs de projetos marcados pelo usuário com checkbox `[x]`
     pub selected_ids: HashSet<String>,
+    /// Posição do cursor/linha destacada na visualização atual
     pub cursor_index: usize,
-    pub scroll_offset: usize,
+    /// Estado da tabela do Ratatui para auto-scroll e controle de offset de visualização
+    pub table_state: TableState,
 
+    /// Termo digitado na barra de busca ao vivo
     pub search_query: String,
+    /// Indica se o modo de digitação de busca está ativo
     pub is_searching: bool,
 
+    /// Campo atualmente usado para ordenação (Tamanho, Idade, Nome, Ecossistema)
     pub sort_field: SortField,
+    /// Direção da ordenação (Crescente / Decrescente)
     pub sort_direction: SortDirection,
+    /// Filtro restritivo de ecossistema (opcional)
     pub ecosystem_filter: Option<Ecosystem>,
 
+    /// Mensagem temporária exibida na barra de status inferior (com timestamp de expiração)
     pub status_message: Option<(String, chrono::DateTime<chrono::Local>)>,
+    /// Indica se uma thread de varredura está em execução em segundo plano
     pub is_scanning: bool,
+    /// Último diretório visitado pela varredura (para indicador ao vivo)
     pub current_scanning_dir: Option<PathBuf>,
+    /// Flag atômica compartilhada para solicitar cancelamento da varredura
     pub scan_cancel: Arc<AtomicBool>,
+    /// Canal receptor de mensagens de varredura
     pub scan_rx: Receiver<ScanMessage>,
+    /// Canal transmissor de mensagens de varredura
     pub scan_tx: Sender<ScanMessage>,
 
+    /// Modal ativo na tela (se houver)
     pub active_modal: Option<ModalState>,
+    /// Método de exclusão configurado (Lixeira vs Permanente)
     pub delete_method: DeletionMethod,
 
+    /// Total de bytes de cache encontrados na varredura
     pub total_scanned_bytes: u64,
+    /// Total de bytes de cache liberados durante a sessão
     pub total_freed_bytes: u64,
+    /// Duração da última varredura em milissegundos
     pub elapsed_scan_millis: u128,
+    /// Flag para sinalizar encerramento gracioso do programa
     pub should_quit: bool,
 }
 
 impl App {
+    /// Inicializa uma nova sessão da TUI e dispara a primeira varredura em segundo plano.
     pub fn new(root_path: PathBuf) -> Self {
         let (scan_tx, scan_rx) = channel();
         let scan_cancel = Arc::new(AtomicBool::new(false));
+        let mut table_state = TableState::default();
+        table_state.select(Some(0));
 
         let mut app = Self {
             root_path: root_path.clone(),
@@ -60,7 +108,7 @@ impl App {
             filtered_indices: Vec::new(),
             selected_ids: HashSet::new(),
             cursor_index: 0,
-            scroll_offset: 0,
+            table_state,
             search_query: String::new(),
             is_searching: false,
             sort_field: SortField::Size,
@@ -84,6 +132,7 @@ impl App {
         app
     }
 
+    /// Dispara uma nova varredura assíncrona da árvore de diretórios.
     pub fn start_scan(&mut self) {
         if self.is_scanning {
             self.scan_cancel.store(true, Ordering::Relaxed);
@@ -93,7 +142,7 @@ impl App {
         self.filtered_indices.clear();
         self.selected_ids.clear();
         self.cursor_index = 0;
-        self.scroll_offset = 0;
+        self.table_state.select(Some(0));
         self.total_scanned_bytes = 0;
         self.is_scanning = true;
 
@@ -111,6 +160,7 @@ impl App {
         });
     }
 
+    /// Processa mensagens pendentes enviadas pela thread de varredura.
     pub fn process_scan_messages(&mut self) {
         while let Ok(msg) = self.scan_rx.try_recv() {
             match msg {
@@ -150,10 +200,12 @@ impl App {
         }
     }
 
+    /// Atualiza a mensagem na barra de status inferior.
     pub fn set_status<S: Into<String>>(&mut self, msg: S) {
         self.status_message = Some((msg.into(), Local::now()));
     }
 
+    /// Filtra e reordena a lista de visualização com base na busca, filtro de ecossistema e ordenação ativa.
     pub fn reapply_filter_and_sort(&mut self) {
         let query = self.search_query.trim().to_lowercase();
         let eco_filter = self.ecosystem_filter;
@@ -190,7 +242,7 @@ impl App {
             .map(|(idx, _)| idx)
             .collect();
 
-        // Sort
+        // Ordenação
         let sort_field = self.sort_field;
         let sort_dir = self.sort_direction;
         let projects_ref = &self.projects;
@@ -204,7 +256,6 @@ impl App {
                 SortField::Age => {
                     let a_age = a.last_modified;
                     let b_age = b.last_modified;
-                    // None (unknown) considered older/newer
                     a_age.cmp(&b_age)
                 }
                 SortField::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
@@ -219,11 +270,18 @@ impl App {
 
         self.filtered_indices = matched_indices;
 
-        if self.cursor_index >= self.filtered_indices.len() {
-            self.cursor_index = self.filtered_indices.len().saturating_sub(1);
+        if self.filtered_indices.is_empty() {
+            self.cursor_index = 0;
+            self.table_state.select(None);
+        } else {
+            if self.cursor_index >= self.filtered_indices.len() {
+                self.cursor_index = self.filtered_indices.len().saturating_sub(1);
+            }
+            self.table_state.select(Some(self.cursor_index));
         }
     }
 
+    /// Alterna a seleção do projeto atualmente sob o cursor.
     pub fn toggle_selection_current(&mut self) {
         if let Some(&proj_idx) = self.filtered_indices.get(self.cursor_index) {
             let proj = &self.projects[proj_idx];
@@ -235,6 +293,7 @@ impl App {
         }
     }
 
+    /// Seleciona ou desmarca todos os projetos atualmente visíveis no filtro.
     pub fn toggle_select_all(&mut self) {
         let all_selected = self
             .filtered_indices
@@ -252,6 +311,7 @@ impl App {
         }
     }
 
+    /// Retorna a soma em bytes dos projetos selecionados.
     pub fn selected_bytes(&self) -> u64 {
         self.projects
             .iter()
@@ -260,10 +320,12 @@ impl App {
             .sum()
     }
 
+    /// Retorna a quantidade de projetos selecionados.
     pub fn selected_count(&self) -> usize {
         self.selected_ids.len()
     }
 
+    /// Retorna a referência ao projeto sob o cursor.
     pub fn current_selected_project(&self) -> Option<&ProjectInfo> {
         self.filtered_indices
             .get(self.cursor_index)
@@ -273,25 +335,32 @@ impl App {
     pub fn move_cursor_up(&mut self) {
         if self.cursor_index > 0 {
             self.cursor_index -= 1;
+            self.table_state.select(Some(self.cursor_index));
         }
     }
 
     pub fn move_cursor_down(&mut self) {
         if !self.filtered_indices.is_empty() && self.cursor_index + 1 < self.filtered_indices.len() {
             self.cursor_index += 1;
+            self.table_state.select(Some(self.cursor_index));
         }
     }
 
     pub fn move_cursor_page_up(&mut self, page_size: usize) {
         self.cursor_index = self.cursor_index.saturating_sub(page_size);
+        if !self.filtered_indices.is_empty() {
+            self.table_state.select(Some(self.cursor_index));
+        }
     }
 
     pub fn move_cursor_page_down(&mut self, page_size: usize) {
         if !self.filtered_indices.is_empty() {
             self.cursor_index = (self.cursor_index + page_size).min(self.filtered_indices.len() - 1);
+            self.table_state.select(Some(self.cursor_index));
         }
     }
 
+    /// Alterna ciclicamente o modo de ordenação (Tamanho -> Idade -> Nome -> Ecossistema).
     pub fn cycle_sort(&mut self) {
         match (self.sort_field, self.sort_direction) {
             (SortField::Size, SortDirection::Descending) => {
@@ -299,7 +368,7 @@ impl App {
             }
             (SortField::Size, SortDirection::Ascending) => {
                 self.sort_field = SortField::Age;
-                self.sort_direction = SortDirection::Ascending; // oldest first
+                self.sort_direction = SortDirection::Ascending;
             }
             (SortField::Age, SortDirection::Ascending) => {
                 self.sort_direction = SortDirection::Descending;
@@ -320,6 +389,7 @@ impl App {
         self.reapply_filter_and_sort();
     }
 
+    /// Executa a deleção física ou envio para a lixeira dos projetos selecionados.
     pub fn execute_deletion(&mut self) {
         let to_delete_ids: Vec<String> = if self.selected_ids.is_empty() {
             if let Some(current) = self.current_selected_project() {
@@ -346,17 +416,16 @@ impl App {
                 if all_success {
                     freed_in_batch += bytes_freed;
                     deleted_count += 1;
-                    false // Remove from list
+                    false
                 } else {
                     failed_count += 1;
-                    // Recalculate remaining
                     project.artifacts.retain(|a| {
                         !results
                             .iter()
                             .any(|r| r.artifact_path == a.full_path && r.success)
                     });
                     project.recalculate_totals();
-                    true // Keep remaining
+                    true
                 }
             } else {
                 true

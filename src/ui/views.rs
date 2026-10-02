@@ -1,3 +1,16 @@
+//! # Renderização de Componentes e Layout com Ratatui
+//!
+//! Este módulo contém todas as funções de desenho da interface gráfica do terminal.
+//!
+//! ### Conceitos Rust e Ratatui Demonstrados:
+//! 1. **Árvore de Layout Flexível (`Layout::split`)**:
+//!    - Divisão da tela em áreas retangulares (`Rect`) com restrições (`Constraint::Percentage`, `Constraint::Length`).
+//! 2. **Widget Composition & Stateful Scrolling**:
+//!    - Uso de `f.render_stateful_widget` com `TableState` para que a tabela acompanhe automaticamente
+//!      o cursor do usuário conforme navega por listas longas.
+//! 3. **Modais Sobrepostos (*Popup / Overlay*)**:
+//!    - Cálculo de coordenadas centradas e uso do widget `Clear` para limpar o fundo antes de renderizar o diálogo.
+
 use crate::cleaner::DeletionMethod;
 use crate::scanner::model::{format_age, format_bytes, Ecosystem, SortDirection, SortField};
 use crate::ui::app::{App, ModalState};
@@ -11,10 +24,11 @@ use ratatui::{
     Frame,
 };
 
-pub fn render(f: &mut Frame, app: &App) {
+/// Função principal de renderização chamada a cada frame da TUI.
+pub fn render(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
-    // Main layout: Header (3 lines), Content (min 10), Footer (2 lines)
+    // Divide a tela verticalmente: Header (3 linhas), Corpo Principal (resto), Rodapé (2 linhas)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -28,6 +42,7 @@ pub fn render(f: &mut Frame, app: &App) {
     render_body(f, app, chunks[1]);
     render_footer(f, app, chunks[2]);
 
+    // Se houver algum modal ativo, ele é desenhado por cima da interface
     if let Some(modal) = app.active_modal {
         match modal {
             ModalState::ConfirmDelete => render_confirm_modal(f, app, size),
@@ -37,6 +52,7 @@ pub fn render(f: &mut Frame, app: &App) {
     }
 }
 
+/// Renderiza o cabeçalho superior com título, status da varredura e resumo estatístico.
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let scan_status_span = if app.is_scanning {
         let path_text = app
@@ -102,8 +118,8 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(header_para, area);
 }
 
-fn render_body(f: &mut Frame, app: &App, area: Rect) {
-    // Split into Left Table (65%) and Right Inspector (35%)
+/// Divide a área principal horizontalmente em Tabela de Projetos (66%) e Painel Inspetor (34%).
+fn render_body(f: &mut Frame, app: &mut App, area: Rect) {
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
@@ -113,6 +129,7 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
     render_inspector(f, app, body_chunks[1]);
 }
 
+/// Mapeia cada ecossistema para sua identidade de cor primária.
 fn get_ecosystem_color(eco: Ecosystem) -> Color {
     match eco {
         Ecosystem::Rust => Color::Rgb(222, 100, 48),
@@ -127,7 +144,8 @@ fn get_ecosystem_color(eco: Ecosystem) -> Color {
     }
 }
 
-fn render_projects_table(f: &mut Frame, app: &App, area: Rect) {
+/// Renderiza a tabela interativa de projetos com auto-scroll integrado via `TableState`.
+fn render_projects_table(f: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = match app.sort_direction {
         SortDirection::Ascending => "^",
         SortDirection::Descending => "v",
@@ -182,11 +200,9 @@ fn render_projects_table(f: &mut Frame, app: &App, area: Rect) {
     let rows: Vec<Row> = app
         .filtered_indices
         .iter()
-        .enumerate()
-        .map(|(view_idx, &proj_idx)| {
+        .map(|&proj_idx| {
             let proj = &app.projects[proj_idx];
             let is_selected = app.selected_ids.contains(&proj.id);
-            let is_cursor = view_idx == app.cursor_index;
 
             let check_mark = if is_selected { "[x]" } else { "[ ]" };
             let eco_badge = proj.ecosystem.badge();
@@ -227,15 +243,7 @@ fn render_projects_table(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(Span::styled(age_str, Style::default().fg(Color::Gray))),
             ];
 
-            let mut row = Row::new(cells).height(1);
-            if is_cursor {
-                row = row.style(
-                    Style::default()
-                        .bg(Color::Rgb(40, 50, 75))
-                        .add_modifier(Modifier::BOLD),
-                );
-            }
-            row
+            Row::new(cells).height(1)
         })
         .collect();
 
@@ -250,6 +258,11 @@ fn render_projects_table(f: &mut Frame, app: &App, area: Rect) {
 
     let table = Table::new(rows, widths)
         .header(header_row)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 50, 75))
+                .add_modifier(Modifier::BOLD),
+        )
         .block(
             Block::default()
                 .title(title)
@@ -262,9 +275,10 @@ fn render_projects_table(f: &mut Frame, app: &App, area: Rect) {
                 }),
         );
 
-    f.render_widget(table, area);
+    f.render_stateful_widget(table, area, &mut app.table_state);
 }
 
+/// Renderiza o painel lateral com detalhes completos do projeto destacado.
 fn render_inspector(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(" Project Details ")
@@ -345,6 +359,7 @@ fn render_inspector(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
+/// Renderiza a barra de atalhos e status na parte inferior do terminal.
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let status_text = if let Some((msg, _)) = &app.status_message {
         msg.as_str()
@@ -359,6 +374,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
+/// Utilitário para centralizar uma caixa flutuante/modal dentro da tela pai.
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -379,6 +395,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Renderiza o modal de confirmação de exclusão.
 fn render_confirm_modal(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(60, 45, area);
     f.render_widget(Clear, popup_area);
@@ -473,6 +490,7 @@ fn render_confirm_modal(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, popup_area);
 }
 
+/// Renderiza o modal de ajuda com todos os atalhos de teclado.
 fn render_help_modal(f: &mut Frame, area: Rect) {
     let popup_area = centered_rect(65, 60, area);
     f.render_widget(Clear, popup_area);
@@ -521,6 +539,7 @@ fn render_help_modal(f: &mut Frame, area: Rect) {
     f.render_widget(table, popup_area);
 }
 
+/// Renderiza o seletor numérico de filtro por ecossistema.
 fn render_filter_modal(f: &mut Frame, _app: &App, area: Rect) {
     let popup_area = centered_rect(50, 45, area);
     f.render_widget(Clear, popup_area);
